@@ -1,0 +1,4 @@
+out/
+apple-health-influxdb
+run.sh
+payload.json
