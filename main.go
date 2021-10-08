@@ -19,6 +19,10 @@ var influxClient influxdb2.Client
 var influxWriteAPI influxapi.WriteAPIBlocking
 var authenticationToken string
 
+var sleepAnalysisDateFields = []string{
+	"inBedEnd", "inBedStart", "sleepStart", "sleepEnd",
+}
+
 type healthDataPayload struct {
 	Data struct {
 		Workouts []*healthDataWorkout `json:"workouts"`
@@ -89,11 +93,6 @@ func incomingMetric(metric *healthDataMetric) error {
 
 	log.Info("Processing metric ", metric.Name)
 
-	// TODO: process sleep more thoroughly (once I get an Apple Watch I guess)
-	if metric.Name == "sleep_analysis" {
-		return nil
-	}
-
 	for _, datum := range metric.Data {
 		if err := parseMetricDataPoint(metric, datum); err != nil {
 			return err
@@ -103,24 +102,32 @@ func incomingMetric(metric *healthDataMetric) error {
 	return nil
 }
 
+func parseMetricDate(date interface{}) (time.Time, error) {
+	// parse the time out
+	dateStr, ok := date.(string)
+	if !ok {
+		return time.Now(), errors.New("date must be string")
+	}
+
+	dateTime, err := time.Parse("2006-01-02 15:04:05 -0700", dateStr)
+	if err != nil {
+		return time.Now(), err
+	}
+
+	return dateTime, nil
+}
+
 func parseMetricDataPoint(metric *healthDataMetric, datum map[string]interface{}) error {
 	// we must have a date
 	date, ok := datum["date"]
 	if !ok {
 		return nil
 	}
-	// parse the time out
-	dateStr, ok := date.(string)
-	if !ok {
-		return errors.New("date must be string")
-	}
 
-	dateTime, err := time.Parse("2006-01-02 15:04:05 -0700", dateStr)
+	dateTime, err := parseMetricDate(date)
 	if err != nil {
 		return err
 	}
-
-	log.Info(dateTime)
 
 	p := influxdb2.NewPointWithMeasurement("apple_health_"+metric.Name).SetTime(dateTime).AddTag("units", metric.Units)
 	for k, v := range datum {
@@ -128,7 +135,33 @@ func parseMetricDataPoint(metric *healthDataMetric, datum map[string]interface{}
 			continue
 		}
 
-		p.AddField(k, v)
+		if metric.Name == "sleep_analysis" {
+
+			// Sleep data is different and has a lot of date fields that we should parse out
+
+			isDateField := false
+			for _, sleepField := range sleepAnalysisDateFields {
+				if k == sleepField {
+					vdate, err := parseMetricDate(v)
+					if err != nil {
+						return err
+					}
+
+					isDateField = true
+
+					p.AddField(k, vdate)
+					break
+				}
+			}
+
+			// This was not a date field
+			if !isDateField {
+				p.AddField(k, v)
+			}
+
+		} else {
+			p.AddField(k, v)
+		}
 	}
 
 	return influxWriteAPI.WritePoint(context.Background(), p)
@@ -154,7 +187,7 @@ func main() {
 	}
 
 	// initialize influxdb2 client
-	influxClient = influxdb2.NewClient("http://"+*influxdbFlag, *influxToken)
+	influxClient = influxdb2.NewClient(*influxdbFlag, *influxToken)
 	influxWriteAPI = influxClient.WriteAPIBlocking(*influxOrg, *influxBucket)
 
 	r := mux.NewRouter()
